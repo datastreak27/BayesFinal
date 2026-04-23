@@ -1,13 +1,158 @@
 ---
 title: "FinalProject"
+author: "Branson Vu, (insert your name here)"
 format: pdf
 editor: visual
 ---
 
-```{r}
-library(dplyr)
-library(skimr)
-summary(concrete_train)
+# Exploratory Data Analysis
 
-skim(concrete_train)
+```{r}
+#| label: Setup
+#| message: false
+#| warning: false
+
+# libraries
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+# GGally is a package that creates nice looking scatterplot matrice
+library(GGally)
+library(tidyr)
+
+# Load the RData file, no need to directly click on the file to load it
+load("concrete_data.RData")
+```
+
+## Data Overview
+
+```{r}
+#| label: Data-Overview
+
+# Dimensions and types
+str(concrete_train)
+
+# Summary stats for all variables
+summary(concrete_train)
+```
+
+```{r}
+#| label: Missing-Values-and-Proportion-of-Zeros
+
+# Check for missing values in train set
+colSums(is.na(concrete_train))
+
+# Proportion of zeros per covariate (slag, ash, cemet_superplasticizer should have many)
+round(colMeans(concrete_train == 0), 3)
+```
+
+## Response Variable: ccs
+
+```{r}
+#| label: Response-Distribution
+#| fig-width: 8
+#| fig-height: 4
+
+# Histogram + density of ccs (concrete compressive strength)
+ggplot(concrete_train, aes(x = ccs)) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "steelblue", alpha = 0.7) +
+  geom_density(linewidth = 0.8) +
+  labs(title = "Distribution of CCS", x = "Compressive Strength (MPa)", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+#| label: Response-Log-Transform
+#| fig-width: 8
+#| fig-height: 4
+
+# Log(ccs) — check if transformation improves normality
+ggplot(concrete_train, aes(x = log(ccs))) +
+  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "darkgreen", alpha = 0.7) +
+  geom_density(linewidth = 0.8) +
+  labs(title = "Distribution of log(CCS)", x = "log(Compressive Strength)", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+#| label: Shapiro-tests
+
+# normality tests on raw and log-transformed ccs
+shapiro.test(concrete_train$ccs)
+shapiro.test(log(concrete_train$ccs))
+```
+
+## Covariate Distributions
+
+```{r}
+#| label: Covariate-Histograms
+#| fig-width: 10
+#| fig-height: 8
+
+# Histograms of all 8 covariates
+concrete_train %>%
+  select(-ccs) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  labs(title = "Covariate Distributions") +
+  theme_minimal()
+```
+
+## Correlations
+
+```{r}
+#| label: Correlation-Matrix
+#| fig-width: 8
+#| fig-height: 7
+
+# pearson correlation matrix
+cor_mat <- cor(concrete_train)
+corrplot(cor_mat, method = "color", type = "upper",
+         addCoef.col = "black", number.cex = 0.7,
+         tl.col = "black", tl.srt = 45,
+         title = "Correlation Matrix", mar = c(0,0,1,0))
+```
+
+```{r}
+#| label: Correlations-with-Response
+
+# Correlations with ccs sorted by absolute value
+cors <- cor(concrete_train)[, "ccs"]
+sort(abs(cors[-length(cors)]), decreasing = TRUE)
+```
+
+## Scatterplots vs Response
+
+```{r}
+#| label: Scatter-vs-ccs
+#| fig-width: 10
+#| fig-height: 8
+
+# Scatterplots of each covariate against ccs
+concrete_train %>%
+  pivot_longer(-ccs, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value, y = ccs)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_smooth(method = "loess", se = FALSE, color = "red", linewidth = 0.7) +
+  facet_wrap(~variable, scales = "free_x", ncol = 3) +
+  labs(title = "Covariates vs CCS", y = "Compressive Strength (MPa)") +
+  theme_minimal()
+```
+
+## Multicollinearity Check
+
+```{r}
+#| label: Pairs-Top-Covariates
+#| fig-width: 10
+#| fig-height: 10
+#| message: false
+
+# Pairwise plot of top correlated covariates + response
+top_vars <- c("cement", "age", "water", "superplasticizer", "ccs")
+ggpairs(concrete_train[, top_vars],
+        lower = list(continuous = wrap("points", alpha = 0.2, size = 0.5)),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.5))) +
+  theme_minimal()
 ```
