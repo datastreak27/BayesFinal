@@ -141,6 +141,8 @@ concrete_train %>%
   theme_minimal()
 ```
 
+Note: Age is likely to be important covariate, maybe Water since most correlate around approximately at 170?
+
 ## Multicollinearity Check
 
 ```{r}
