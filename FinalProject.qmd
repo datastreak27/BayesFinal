@@ -141,7 +141,7 @@ concrete_train %>%
   theme_minimal()
 ```
 
-Note: Age is likely to be important covariate, maybe Water since most correlate around approximately at 170?
+Note: Age is likely to be important covariate, maybe Water since most correlate around approximately at 190?
 
 ## Multicollinearity Check
 
@@ -157,4 +157,10 @@ ggpairs(concrete_train[, top_vars],
         lower = list(continuous = wrap("points", alpha = 0.2, size = 0.5)),
         diag = list(continuous = wrap("densityDiag", alpha = 0.5))) +
   theme_minimal()
+```
+
+Notes: maybe a T-Test (or Z-test) to test all of the covariates and see which is the most significant towards model fit
+
+```{r}
+
 ```
