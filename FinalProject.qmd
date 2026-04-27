@@ -133,6 +133,8 @@ concrete_train %>%
   theme_minimal()
 ```
 
+Notes: Most covariates show roughly linear relationships with ccs, but `age` stands out — the loess smoother reveals a steep rise in strength during early curing (days 1–28) that flattens at later ages. This diminishing-returns pattern suggests a `log(age)` transformation may better capture the relationship than a raw linear term.
+
 ## Multicollinearity Check
 
 ```{r}
@@ -479,7 +481,7 @@ Note: Base Model and Model with Wide Priors yield same results
 
 ## Model Formulation Sensitivity
 
-Test whether adding interaction effects or transforming covariates improves model fit.
+The EDA scatterplots revealed that `age` has a nonlinear (diminishing-returns) relationship with ccs, while `cement` and `age` are the two strongest predictors. We test two alternative formulations: (1) adding a `cement * age` interaction term, and (2) replacing `age` with `log(age)` to capture the curing curve. LOO-CV determines which formulation best improves out-of-sample predictions.
 
 ```{r}
 #| label: Model-Interaction
