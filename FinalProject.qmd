@@ -158,3 +158,14 @@ ggpairs(concrete_train[, top_vars],
         diag = list(continuous = wrap("densityDiag", alpha = 0.5))) +
   theme_minimal()
 ```
+
+## Quick Screening
+
+```{r}
+freq_fit <- lm(ccs ~ ., data = concrete_train)
+summary(freq_fit)
+# check multicollinearity
+car::vif(freq_fit)
+```
+
+Age, Cement, Slag, Ash, Water are likely significant covariates, but should include in the model to compare via LOO
