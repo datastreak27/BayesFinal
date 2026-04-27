@@ -50,6 +50,16 @@ round(colMeans(concrete_train == 0), 3)
 ## Response Variable: ccs
 
 ```{r}
+#| label: Shapiro-Tests
+
+# normality tests on raw and log-transformed ccs
+shapiro.test(concrete_train$ccs)
+shapiro.test(log(concrete_train$ccs))
+```
+
+Notes: Based on the Shapiro-Wilk tests and skewness checks, we will use the raw ccs values for modeling because the log transformation overcorrects the data and actually introduces a more severe left-skew.
+
+```{r}
 #| label: Response-Distribution
 #| fig-width: 8
 #| fig-height: 4
@@ -60,27 +70,6 @@ ggplot(concrete_train, aes(x = ccs)) +
   geom_density(linewidth = 0.8) +
   labs(title = "Distribution of CCS", x = "Compressive Strength (MPa)", y = "Density") +
   theme_minimal()
-```
-
-```{r}
-#| label: Response-Log-Transform
-#| fig-width: 8
-#| fig-height: 4
-
-# Log(ccs) — check if transformation improves normality
-ggplot(concrete_train, aes(x = log(ccs))) +
-  geom_histogram(aes(y = after_stat(density)), bins = 30, fill = "darkgreen", alpha = 0.7) +
-  geom_density(linewidth = 0.8) +
-  labs(title = "Distribution of log(CCS)", x = "log(Compressive Strength)", y = "Density") +
-  theme_minimal()
-```
-
-```{r}
-#| label: Shapiro-tests
-
-# normality tests on raw and log-transformed ccs
-shapiro.test(concrete_train$ccs)
-shapiro.test(log(concrete_train$ccs))
 ```
 
 ## Covariate Distributions
@@ -124,6 +113,8 @@ cors <- cor(concrete_train)[, "ccs"]
 sort(abs(cors[-length(cors)]), decreasing = TRUE)
 ```
 
+Notes: `cement` ranks #1 with a correlation of \~0.50. Age is the next highest positive correlation. These covariates will be used for the model.
+
 ## Scatterplots vs Response
 
 ```{r}
@@ -142,8 +133,6 @@ concrete_train %>%
   theme_minimal()
 ```
 
-Note: Age is likely to be important covariate, maybe Water since most correlate around approximately at 190?
-
 ## Multicollinearity Check
 
 ```{r}
@@ -160,7 +149,7 @@ ggpairs(concrete_train[, top_vars],
   theme_minimal()
 ```
 
-## Quick Header
+## Frequentist Screening
 
 ```{r}
 freq_fit <- lm(ccs ~ ., data = concrete_train)
@@ -169,16 +158,46 @@ summary(freq_fit)
 #car::vif(freq_fit)
 ```
 
-Age, Cement, Slag, Ash, Water are likely significant covariates, but should include in the model to compare via LOO
+Age, Cement, Slag, Ash, Water are likely significant covariates, but we include all in the model and compare via LOO.
+
+## Modeling Assumptions
+
+Before fitting our Bayesian linear regression, we state the key assumptions underlying the model:
+
+1.  **Linearity**: The response (ccs) is a linear function of the covariates. The scatterplots with loess smoothers above show roughly linear trends for the strongest predictors (cement, water, age), supporting this assumption.
+2.  **Independence**: Each observation represents a separate concrete mixture, so we assume independence across samples.
+3.  **Normality of errors**: The residuals are assumed to follow a Normal distribution. The Shapiro-Wilk test on raw ccs showed mild deviation (common with N=800), but the distribution is reasonably symmetric with a skewness of only +0.41.
+4.  **Constant variance (homoscedasticity)**: The variance of residuals is assumed constant across all fitted values. We chose raw ccs over log(ccs) based on the Shapiro tests; residual plots after fitting will verify this.
+5.  **No perfect multicollinearity**: VIF values from the frequentist screening are elevated (5-8 range) for several covariates due to the mixture nature of concrete data, but none are extreme. Bayesian priors provide regularization that mitigates multicollinearity.
+
+## Proposed Model
+
+We fit a **Bayesian linear regression** with the following specification:
+
+**Likelihood:** $$y_i \mid \boldsymbol{\beta}, \sigma^2 \sim N(\alpha + \mathbf{x}_i^\top \boldsymbol{\beta},\; \sigma^2)$$
+
+Where $y_i$ is the raw compressive strength (ccs) and $\mathbf{x}_i$ is the standardized covariate vector for observation $i$.
+
+**Priors:**
+
+-   Intercept: $\alpha \sim N(0, 10)$
+-   Slopes: $\beta_j \sim N(0, 5)$ for $j = 1, \ldots, 8$ (weakly informative on standardized scale)
+-   Residual SD: $\sigma \sim \text{Half-Cauchy}(0, 5)$
+
+**Prior sensitivity plan:** We will refit the model under tight priors ($\beta \sim N(0,1)$) and wide priors ($\beta \sim N(0,50)$), then compare posterior means and 95% credible intervals across all three specifications. If the posteriors are stable, our inference is data-driven. We will also test sensitivity to model formulation by adding a cement $\times$ age interaction term and a log(age) transformation, comparing all variants via LOO-CV.
 
 # Model Fit and Assessment
 
 ```{r}
+#| label: Baseline-Stan
+#| message: false
+#| warning: false
+
 library(rstan)
 #library(rstanarm)
 library(loo)
 # standardize covariates
-X_raw <- concrete_trainselect(-ccs)
+X_raw <- concrete_train %>% select(-ccs)
 X_means <- colMeans(X_raw)
 X_sds   <- apply(X_raw, 2, sd)
 X_scaled <- scale(X_raw)
@@ -190,7 +209,7 @@ data {
   int<lower=0> N;          // number of observations
   int<lower=0> K;          // number of covariates
   matrix[N, K] X;          // covariate matrix (standardized)
-  vector[N] y;             // response (log(ccs) or ccs)
+  vector[N] y;             // response (raw ccs)
 }
 
 parameters {
@@ -219,6 +238,421 @@ generated quantities {
 ```
 
 ```{r}
-fit <- stan(stan_concrete_model, data = concrete_train,
-            chains = 4, iter = 2000, warmup = 1000, seed = 42)
+#| label: Fit-Base-Model
+
+# prepare data list for Stan (using raw ccs based on EDA — log overcorrects skew)
+stan_data <- list(
+  N = nrow(concrete_train),
+  K = ncol(X_scaled),
+  X = X_scaled,
+  y = concrete_train$ccs
+)
+
+fit <- stan(model_code = stan_concrete_model, data = stan_data,
+            chains = 4, iter = 2000, warmup = 1000, seed = 40233)
+```
+
+## Convergence Diagnostics
+
+We check convergence to ensure MCMC chains have mixed well and our posterior samples are reliable.
+
+```{r}
+#| label: Model-Summary
+
+# posterior summary — check R-hat (should be < 1.01) and n_eff
+print(fit, pars = c("alpha", "beta", "sigma"))
+```
+
+```{r}
+#| label: Traceplots
+#| fig-width: 10
+#| fig-height: 8
+
+library(bayesplot)
+
+# traceplots — chains should look like "hairy caterpillars" (well-mixed)
+posterior <- as.array(fit)
+mcmc_trace(posterior, pars = c("alpha", paste0("beta[", 1:8, "]"), "sigma"))
+```
+
+### Gelman-Rubin (R-hat)
+
+R-hat compares between-chain and within-chain variance. Values near 1.0 indicate convergence; values \> 1.01 suggest chains haven't converged.
+
+```{r}
+#| label: Gelman-Rubin
+
+# extract R-hat for all parameters
+fit_summary <- summary(fit)$summary
+rhat_vals <- fit_summary[, "Rhat"]
+
+# show R-hat for model parameters only
+param_names <- c("alpha", paste0("beta[", 1:8, "]"), "sigma")
+rhat_params <- rhat_vals[param_names]
+print(round(rhat_params, 4))
+
+# flag any R-hat > 1.01
+cat("\nAny R-hat > 1.01?", any(rhat_params > 1.01, na.rm = TRUE), "\n")
+```
+
+### Geweke Diagnostic
+
+Geweke tests whether the mean of the first 10% and last 50% of the chain are equal. Z-scores outside (-2, 2) suggest non-convergence.
+
+```{r}
+#| label: Geweke-Diagnostic
+
+# bayesian analysis, specifically MCMC sims
+library(coda)
+
+# convert to coda mcmc.list for Geweke test
+posterior_list <- As.mcmc.list(fit)
+
+# Geweke z-scores for each chain (first chain shown)
+geweke_results <- geweke.diag(posterior_list[[1]])
+print(geweke_results)
+```
+
+### Effective Sample Size (ESS)
+
+ESS estimates the number of independent samples from the posterior. We want ESS \> 1000 for all parameters to ensure stable posterior estimates.
+
+```{r}
+#| label: ESS-Check
+
+# extract ESS (n_eff) for model parameters
+ess_vals <- fit_summary[param_names, "n_eff"]
+print(round(ess_vals))
+
+# flag any ESS < 1000
+cat("\nAny ESS < 1000?", any(ess_vals < 1000, na.rm = TRUE), "\n")
+```
+
+## Prior Sensitivity Analysis
+
+To ensure these estimates are trustworthy and not artifacts of our prior choice, we refit the model under three prior specifications:
+
+-   **Base model**: `beta ~ N(0, 5)` — weakly informative, allows moderate coefficient values
+-   **Tight priors**: `beta ~ N(0, 1)` — more regularizing, shrinks coefficients toward zero
+-   **Wide priors**: `beta ~ N(0, 50)` — essentially flat/uninformative, lets data fully determine estimates
+
+If the posterior means and credible intervals are stable across all three, our results are data-driven and robust.
+
+```{r}
+#| label: Prior-Sensitivity-Models
+
+# Tight priors: stronger regularization, pulls coefficients toward 0
+# If posteriors shift significantly vs base → prior is too influential
+stan_model_tight <- "
+data {
+  int<lower=0> N;
+  int<lower=0> K;
+  matrix[N, K] X;
+  vector[N] y;
+}
+parameters {
+  real alpha;
+  vector[K] beta;
+  real<lower=0> sigma;
+}
+model {
+  alpha ~ normal(0, 2);
+  beta  ~ normal(0, 1);
+  sigma ~ cauchy(0, 2);
+  y ~ normal(alpha + X * beta, sigma);
+}
+generated quantities {
+  vector[N] log_lik;
+  for (n in 1:N)
+    log_lik[n] = normal_lpdf(y[n] | alpha + X[n] * beta, sigma);
+}
+"
+
+# Wide priors: nearly flat, lets data speak entirely for itself
+# If posteriors match the base model, then the data is informative enough to overcome any prior
+stan_model_wide <- "
+data {
+  int<lower=0> N;
+  int<lower=0> K;
+  matrix[N, K] X;
+  vector[N] y;
+}
+parameters {
+  real alpha;
+  vector[K] beta;
+  real<lower=0> sigma;
+}
+model {
+  alpha ~ normal(0, 100);
+  beta  ~ normal(0, 50);
+  sigma ~ cauchy(0, 25);
+  y ~ normal(alpha + X * beta, sigma);
+}
+generated quantities {
+  vector[N] log_lik;
+  for (n in 1:N)
+    log_lik[n] = normal_lpdf(y[n] | alpha + X[n] * beta, sigma);
+}
+"
+
+fit_tight <- stan(model_code = stan_model_tight, data = stan_data,
+                  chains = 4, iter = 2000, warmup = 1000, seed = 40233)
+
+fit_wide  <- stan(model_code = stan_model_wide, data = stan_data,
+                  chains = 4, iter = 2000, warmup = 1000, seed = 40233)
+```
+
+```{r}
+#| label: Prior-Sensitivity-Comparison
+#| fig-width: 10
+#| fig-height: 6
+
+# compare posterior means across all three prior settings
+# if values are nearly identical, then our posterior means are robust
+base_means  <- summary(fit)$summary[param_names, "mean"]
+tight_means <- summary(fit_tight)$summary[param_names, "mean"]
+wide_means  <- summary(fit_wide)$summary[param_names, "mean"]
+
+comparison <- data.frame(
+  Parameter = param_names,
+  Base  = round(base_means, 3),
+  Tight = round(tight_means, 3),
+  Wide  = round(wide_means, 3)
+)
+print(comparison)
+
+# also compare 95% credible interval widths for each prior setting
+cat("\n=== 95% Credible Intervals: Base Model ===\n")
+print(round(summary(fit)$summary[param_names, c("2.5%", "97.5%")], 3))
+
+cat("\n=== 95% Credible Intervals: Tight Priors ===\n")
+print(round(summary(fit_tight)$summary[param_names, c("2.5%", "97.5%")], 3))
+
+cat("\n=== 95% Credible Intervals: Wide Priors ===\n")
+print(round(summary(fit_wide)$summary[param_names, c("2.5%", "97.5%")], 3))
+```
+
+If the credible intervals are similar across all three prior specifications, then our inference is stable and we can confidently report the base model's posterior means and 95% intervals as our final estimates.
+
+```{r}
+#| label: Prior-Sensitivity-Density
+#| fig-width: 10
+#| fig-height: 6
+
+# visual comparison of posterior densities across prior choices
+post_base  <- as.matrix(fit)[, paste0("beta[", 1:8, "]")]
+post_tight <- as.matrix(fit_tight)[, paste0("beta[", 1:8, "]")]
+post_wide  <- as.matrix(fit_wide)[, paste0("beta[", 1:8, "]")]
+
+# overlay densities for cement (strongest predictor)
+# densities that overlap = prior doesn't matter = trustworthy estimate
+plot_df <- data.frame(
+  value = c(post_base[,1], post_tight[,1], post_wide[,1]),
+  Prior = rep(c("Base N(0,5)", "Tight N(0,1)", "Wide N(0,50)"), each = nrow(post_base))
+)
+
+ggplot(plot_df, aes(x = value, fill = Prior)) +
+  geom_density(alpha = 0.4) +
+  labs(title = "Prior Sensitivity: Posterior of cement coefficient",
+       subtitle = "Overlapping densities indicate data-driven posterior",
+       x = "beta[1] (cement)") +
+  theme_minimal()
+```
+
+## LOO-CV Comparison
+
+LOO-CV (Leave-One-Out Cross-Validation) estimates out-of-sample predictive performance. Higher ELPD = better model. We compare the base model across prior specifications.
+
+```{r}
+#| label: Loo-Comparison
+
+# LOO for each prior setting
+loo_base  <- loo(extract_log_lik(fit, merge_chains = FALSE))
+loo_tight <- loo(extract_log_lik(fit_tight, merge_chains = FALSE))
+loo_wide  <- loo(extract_log_lik(fit_wide, merge_chains = FALSE))
+
+# compare
+loo_compare(loo_base, loo_tight, loo_wide)
+```
+
+Note: Base Model and Model with Wide Priors yield same results
+
+## Model Formulation Sensitivity
+
+Test whether adding interaction effects or transforming covariates improves model fit.
+
+```{r}
+#| label: Model-Interaction
+#| message: false
+
+# Model 2: add cement*age interaction (two strongest predictors) as beta[9]
+X_interact <- cbind(X_scaled, cement_age = X_scaled[,"cement"] * X_scaled[,"age"])
+
+stan_data_interact <- list(
+  N = nrow(concrete_train),
+  K = ncol(X_interact),
+  X = X_interact,
+  y = concrete_train$ccs
+)
+
+fit_interact <- stan(model_code = stan_concrete_model, data = stan_data_interact,
+                     chains = 4, iter = 2000, warmup = 1000, seed = 40233)
+```
+
+```{r}
+#| label: Model-Log-Age
+#| message: false
+
+# Model 3: use log(age) instead of raw age (diminishing returns pattern in EDA)
+X_log_age <- X_raw
+X_log_age$age <- log(X_log_age$age)
+X_log_age_scaled <- scale(X_log_age)
+
+stan_data_log_age <- list(
+  N = nrow(concrete_train),
+  K = ncol(X_log_age_scaled),
+  X = X_log_age_scaled,
+  y = concrete_train$ccs
+)
+
+fit_log_age <- stan(model_code = stan_concrete_model, data = stan_data_log_age,
+                    chains = 4, iter = 2000, warmup = 1000, seed = 40233)
+```
+
+```{r}
+#| label: Formulation-Loo-Comparison
+
+# LOO comparison of model formulations
+loo_interact <- loo(extract_log_lik(fit_interact, merge_chains = FALSE))
+loo_log_age  <- loo(extract_log_lik(fit_log_age, merge_chains = FALSE))
+
+cat("=== Model Formulation Comparison ===\n")
+loo_compare(loo_base, loo_interact, loo_log_age)
+```
+
+Note: `fit_log_age` is the better model compared to the base model and the model with the cement\*age covariate.
+
+```{r}
+#| label: Formulation-Summary
+
+# summary of interaction model
+cat("=== Interaction Model (cement*age) ===\n")
+print(fit_interact, pars = c("alpha", paste0("beta[", 1:9, "]"), "sigma"))
+
+# summary of log-age model
+cat("\n=== Log-Age Model ===\n")
+print(fit_log_age, pars = c("alpha", paste0("beta[", 1:8, "]"), "sigma"))
+```
+
+# Interpretation of Results
+
+## Covariate Significance Summary
+
+```{r}
+#| label: Covariate-Significance
+
+# extract posterior samples for all betas from the best model (fit_log_age)
+beta_samples <- as.matrix(fit_log_age)[, paste0("beta[", 1:8, "]")]
+covariate_names <- colnames(X_log_age_scaled)
+
+# build summary table
+sig_table <- data.frame(
+  Covariate = covariate_names,
+  
+  # posterior mean
+  Post_Mean = round(colMeans(beta_samples), 3),
+  
+  # 95% credible interval bounds
+  CI_Lower = round(apply(beta_samples, 2, quantile, 0.025), 3),
+  CI_Upper = round(apply(beta_samples, 2, quantile, 0.975), 3),
+  
+  # probability of direction: max(P(beta > 0), P(beta < 0))
+  # values near 1.0 = strong directional evidence
+  Prob_Direction = round(apply(beta_samples, 2, function(x) max(mean(x > 0), mean(x < 0))), 3),
+  
+  # does the 95% CI exclude zero?
+  Significant = apply(beta_samples, 2, function(x) {
+    ci <- quantile(x, c(0.025, 0.975))
+    ifelse(ci[1] > 0 | ci[2] < 0, "YES", "NO")
+  })
+)
+
+rownames(sig_table) <- NULL
+print(sig_table)
+
+# quick summary
+cat("\n--- Significant covariates (95% CI excludes 0) ---\n")
+cat(paste(sig_table$Covariate[sig_table$Significant == "YES"], collapse = ", "), "\n")
+
+cat("\n--- Non-significant covariates (95% CI includes 0) ---\n")
+cat(paste(sig_table$Covariate[sig_table$Significant == "NO"], collapse = ", "), "\n")
+```
+
+```{r}
+#| label: Significance-Plot
+#| fig-width: 9
+#| fig-height: 5
+
+# visual: color-coded credible intervals (green = significant, red = not)
+sig_table$color <- ifelse(sig_table$Significant == "YES", "Significant", "Not Significant")
+
+ggplot(sig_table, aes(x = Post_Mean, y = reorder(Covariate, abs(Post_Mean)), color = color)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = CI_Lower, xmax = CI_Upper), height = 0.2, linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
+  scale_color_manual(values = c("Significant" = "green", "Not Significant" = "red")) +
+  labs(title = "Covariate Significance: 95% Credible Intervals",
+       subtitle = "Green intervals exclude zero; red intervals include zero",
+       x = "Posterior Mean (Standardized Scale)", y = "", color = "") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Key Findings
+
+Based on the 95% credible intervals from our best model (`fit_log_age`), the most significant covariates for predicting concrete compressive strength are `cement` and `age` (log-transformed), which have the largest posterior means and intervals that are firmly away from zero. `water` is also significant with a strong negative effect. Covariates such as `coarse_agg` and `fine_agg` have intervals that include zero, indicating weak or no evidence of a meaningful effect on strength — consistent with our earlier frequentist screening. The log-age model was selected as the best formulation based on LOO-CV, as it captures the nonlinear curing process of concrete.
+
+# Predictions on Test Set
+
+```{r}
+#| label: Predictions
+
+# prepare test covariates using same log(age) transformation and scaling
+X_test_raw <- concrete_test %>% select(-ccs)
+X_test_raw$age <- log(X_test_raw$age)
+
+# scale test data using training means and SDs
+X_test_scaled <- scale(X_test_raw,
+                       center = attr(X_log_age_scaled, "scaled:center"),
+                       scale  = attr(X_log_age_scaled, "scaled:scale"))
+
+# extract posterior samples from the best model
+alpha_samples <- as.matrix(fit_log_age)[, "alpha"]
+beta_samples_pred <- as.matrix(fit_log_age)[, paste0("beta[", 1:8, "]")]
+
+# compute posterior predictive mean for each test observation
+# each row of pred_matrix is one posterior draw, each column is one test obs
+pred_matrix <- alpha_samples + beta_samples_pred %*% t(X_test_scaled)
+
+# posterior mean predictions (vector of length 230)
+post_mean <- colMeans(pred_matrix)
+
+# 95% posterior predictive intervals (230 x 2 matrix)
+post_int <- t(apply(pred_matrix, 2, quantile, probs = c(0.025, 0.975)))
+colnames(post_int) <- c("2.5%", "97.5%")
+
+# verify dimensions
+cat("post_mean length:", length(post_mean), "\n")
+cat("post_int dimensions:", dim(post_int), "\n")
+
+# preview
+head(data.frame(Mean = round(post_mean, 2), post_int))
+```
+
+```{r}
+#| label: Export-Results
+
+# save predictions to .RData file
+save(post_mean, post_int, file = "40233_Group_3.RData")
+
 ```
