@@ -1,6 +1,6 @@
 ---
 title: "FinalProject"
-author: "Branson Vu, (insert your name here)"
+author: "Branson Vu, Blake Tran, (insert your name here)"
 format: pdf
 editor: visual
 ---
