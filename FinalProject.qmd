@@ -19,6 +19,7 @@ library(corrplot)
 # GGally is a package that creates nice looking scatterplot matrice
 library(GGally)
 library(tidyr)
+#library(car)
 
 # Load the RData file, no need to directly click on the file to load it
 load("concrete_data.RData")
@@ -159,21 +160,65 @@ ggpairs(concrete_train[, top_vars],
   theme_minimal()
 ```
 
-<<<<<<< HEAD
-## Quick Screening
+## Quick Header
 
 ```{r}
 freq_fit <- lm(ccs ~ ., data = concrete_train)
 summary(freq_fit)
 # check multicollinearity
-car::vif(freq_fit)
+#car::vif(freq_fit)
 ```
 
 Age, Cement, Slag, Ash, Water are likely significant covariates, but should include in the model to compare via LOO
-=======
-Notes: maybe a T-Test (or Z-test) to test all of the covariates and see which is the most significant towards model fit
+
+# Model Fit and Assessment
 
 ```{r}
-
+library(rstan)
+#library(rstanarm)
+library(loo)
+# standardize covariates
+X_raw <- concrete_trainselect(-ccs)
+X_means <- colMeans(X_raw)
+X_sds   <- apply(X_raw, 2, sd)
+X_scaled <- scale(X_raw)
 ```
->>>>>>> 1ff4196c9cb4ea6596b492be209ad4c107c8af09
+
+```{r}
+stan_concrete_model <- "
+data {
+  int<lower=0> N;          // number of observations
+  int<lower=0> K;          // number of covariates
+  matrix[N, K] X;          // covariate matrix (standardized)
+  vector[N] y;             // response (log(ccs) or ccs)
+}
+
+parameters {
+  real alpha;              // intercept
+  vector[K] beta;          // slopes
+  real<lower=0> sigma;     // residual sd
+}
+
+model {
+  // priors
+  alpha ~ normal(0, 10);
+  beta  ~ normal(0, 5);
+  sigma ~ cauchy(0, 5);
+
+  // likelihood
+  y ~ normal(alpha + X * beta, sigma);
+}
+
+generated quantities {
+  vector[N] log_lik;       // for LOO-CV
+  for (n in 1:N)
+    log_lik[n] = normal_lpdf(y[n] | alpha + X[n] * beta, sigma);
+}
+"
+  
+```
+
+```{r}
+fit <- stan(stan_concrete_model, data = concrete_train,
+            chains = 4, iter = 2000, warmup = 1000, seed = 42)
+```
