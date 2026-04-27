@@ -481,7 +481,11 @@ Note: Base Model and Model with Wide Priors yield same results
 
 ## Model Formulation Sensitivity
 
-The EDA scatterplots revealed that `age` has a nonlinear (diminishing-returns) relationship with ccs, while `cement` and `age` are the two strongest predictors. We test two alternative formulations: (1) adding a `cement * age` interaction term, and (2) replacing `age` with `log(age)` to capture the curing curve. LOO-CV determines which formulation best improves out-of-sample predictions.
+The EDA scatterplots revealed that `age` has a nonlinear (diminishing-returns) relationship with ccs, while `cement` and `age` are the two strongest predictors. We test two alternative formulations:
+
+-   Adding a `cement * age` interaction term.
+
+-   Replacing `age` with `log(age)` to capture the curing curve. LOO-CV determines which formulation best improves out-of-sample predictions.
 
 ```{r}
 #| label: Model-Interaction
