@@ -141,7 +141,7 @@ concrete_train %>%
   theme_minimal()
 ```
 
-Note: Age is likely to be important covariate, maybe Water since most correlate around approximately at 170?
+Note: Age is likely to be important covariate, maybe Water since most correlate around approximately at 190?
 
 ## Multicollinearity Check
 
@@ -159,6 +159,7 @@ ggpairs(concrete_train[, top_vars],
   theme_minimal()
 ```
 
+<<<<<<< HEAD
 ## Quick Screening
 
 ```{r}
@@ -169,3 +170,10 @@ car::vif(freq_fit)
 ```
 
 Age, Cement, Slag, Ash, Water are likely significant covariates, but should include in the model to compare via LOO
+=======
+Notes: maybe a T-Test (or Z-test) to test all of the covariates and see which is the most significant towards model fit
+
+```{r}
+
+```
+>>>>>>> 1ff4196c9cb4ea6596b492be209ad4c107c8af09
