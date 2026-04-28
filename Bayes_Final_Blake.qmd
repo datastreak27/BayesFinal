@@ -1,0 +1,359 @@
+---
+title: "Predicting_concret_strength"
+author: "Blake, Branson, Daylan, Emmett"
+date: "2026-04-27"
+output: pdf
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+install.packages(c("rstanarm", "bayesplot", "loo", "coda"))
+```
+
+
+## Load the libraries 
+
+```{r}
+options(timeout = 600)
+install.packages("ggcorrplot")
+
+install.packages("rstanarm")
+install.packages("shiny")
+install.packages("igraph")
+library(rstanarm)
+library(bayesplot)
+library(loo)
+library(coda)
+library(ggcorrplot)
+
+# Use multiple CPU cores so chains run in parallel (much faster)
+options(mc.cores = parallel::detectCores())
+
+# Set a seed so the results are reproducible
+set.seed(42)
+
+
+
+```
+
+## Inspecting the dataset
+
+```{r}
+df <- load("concrete_data.RData")
+
+print(df)
+
+## Inspecting the dimensions
+dim(concrete_train)
+
+## Check the columns name :
+names(concrete_train)
+##
+summary(concrete_train)
+
+
+
+```
+
+```{r}
+
+## Checking for missing datas
+
+# Any missing values in training data?
+sum(is.na(concrete_train))
+
+# Any missing values in test data (other than ccs which we expect)?
+sum(is.na(concrete_test$ccs))           # should be 230
+sum(is.na(concrete_test[, 1:8]))        # should be 0
+
+```
+
+
+
+```{r}
+# Set up a 3x3 grid so we can see all 9 variables at once
+par(mfrow = c(3, 3))
+
+for (col in names(concrete_train)) {
+  hist(concrete_train[[col]],
+       main = col,
+       xlab = col,
+       col  = "steelblue",
+       breaks = 30)
+}
+
+# Reset back to single plot
+par(mfrow = c(1, 1))
+
+
+```
+## Transforming age to log(age) to produce a more evenly distributed fit 
+
+```{r}
+par(mfrow = c(1, 2))
+hist(concrete_train$age, breaks = 30, col = "steelblue",
+     main = "age (raw)", xlab = "age")
+hist(log(concrete_train$age), breaks = 30, col = "darkorange",
+     main = "log(age)", xlab = "log(age)")
+par(mfrow = c(1, 1))
+```
+## Check the correlation between log(age) vs ccs and age vs ccs :
+
+```{r}
+cor(concrete_train$age,      concrete_train$ccs)
+cor(log(concrete_train$age), concrete_train$ccs)
+
+
+par(mfrow = c(1, 2))
+plot(concrete_train$age, concrete_train$ccs,
+     main = "ccs vs age", xlab = "age", ylab = "ccs",
+     pch = 16, col = rgb(0, 0, 0, 0.3))
+plot(log(concrete_train$age), concrete_train$ccs,
+     main = "ccs vs log(age)", xlab = "log(age)", ylab = "ccs",
+     pch = 16, col = rgb(0, 0, 0, 0.3))
+par(mfrow = c(1, 1))
+
+
+
+```
+## Using log(age) as a predictor and drop raw age 
+
+```{r}
+# Create a working copy with log_age
+train_work <- concrete_train
+train_work$log_age <- log(train_work$age)
+train_work$age <- NULL   # drop raw age
+
+# Full correlation matrix, rounded for readability
+round(cor(train_work), 2)
+
+
+ggcorrplot(cor(train_work),
+           type    = "upper",
+           lab     = TRUE,
+           lab_size = 3.5,
+           method   = "square",
+           colors   = c("#B2182B", "white", "#2166AC"),
+           title    = "Correlation Matrix",
+           ggtheme  = ggplot2::theme_minimal()) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+```
+
+## Standardized the training and test variables :
+
+```{r}
+# Helper: add log_age column, drop raw age
+prep_data <- function(df) {
+  df$log_age <- log(df$age)
+  df$age <- NULL
+  df
+}
+
+train <- prep_data(concrete_train)
+test  <- prep_data(concrete_test)
+
+# Predictors (exactly what we'll feed the model)
+predictors <- c("cement", "slag", "ash", "water", "superplasticizer",
+                "coarse_agg", "fine_agg", "log_age")
+
+# Compute means and SDs from TRAINING data only
+mu <- sapply(train[, predictors], mean)
+sg <- sapply(train[, predictors], sd)
+
+# Apply standardization to both sets (same mu/sg for both!)
+train_s <- train
+test_s  <- test
+for (v in predictors) {
+  train_s[[v]] <- (train[[v]] - mu[v]) / sg[v]
+  test_s[[v]]  <- (test[[v]]  - mu[v]) / sg[v]
+}
+
+# Sanity check: standardized predictors should have mean ≈ 0, sd ≈ 1 in TRAINING
+round(colMeans(train_s[, predictors]), 3)   # all ~ 0
+round(apply(train_s[, predictors], 2, sd), 3)  # all = 1
+
+
+```
+
+## Fit the model :
+
+```{r}
+
+fit_default <- stan_glm(
+  ccs ~ cement + slag + ash + water + superplasticizer +
+        coarse_agg + fine_agg + log_age,
+  data    = train_s,
+  family  = gaussian(),
+  prior_intercept = normal(0, 2.5, autoscale = TRUE),
+  prior           = normal(0, 2.5, autoscale = TRUE),
+  prior_aux       = exponential(1, autoscale = TRUE),
+  chains = 4,
+  iter   = 4000,
+  warmup = 1000,
+  seed   = 42
+)
+```
+
+```{r}
+# Full summary with credible intervals
+print(fit_default, digits = 3)
+
+# More detailed summary
+summary(fit_default, digits = 3,
+        probs = c(0.025, 0.5, 0.975))
+```
+
+## Visualizing 
+
+```{r}
+
+library(ggplot2)
+# Posterior intervals for all coefficients (Section 3 plot)
+mcmc_areas(as.matrix(fit_default),
+           pars = c("cement", "slag", "ash", "water",
+                    "superplasticizer", "coarse_agg",
+                    "fine_agg", "log_age"),
+           prob = 0.95) +
+  ggtitle("Posterior 95% intervals for standardized coefficients")
+
+# Trace plots — convergence visualization (Section 2 plot)
+mcmc_trace(fit_default,
+           pars = c("cement", "log_age", "water", "sigma"))
+```
+## Geweke statistic 
+
+
+```{r}
+# --- Geweke statistic ---
+# |z| < 1.96 means no evidence of non-convergence (95% confidence)
+draws_array <- as.array(fit_default)
+mcmc_list <- coda::as.mcmc.list(
+  lapply(seq_len(dim(draws_array)[2]),
+         function(c) coda::as.mcmc(draws_array[, c, ]))
+)
+geweke_result <- coda::geweke.diag(mcmc_list)
+print(geweke_result)
+
+
+# --- Posterior predictive check ---
+# Simulate datasets from the model and overlay on observed ccs
+yrep <- posterior_predict(fit_default, draws = 200)
+
+ppc_dens_overlay(y = train_s$ccs, yrep = yrep[1:50, ]) +
+  ggtitle("PPC: simulated ccs (light) vs observed ccs (dark)")
+
+ppc_scatter_avg(y = train_s$ccs, yrep = yrep) +
+  ggtitle("PPC: average predicted vs observed ccs")
+```
+## Prior sensitivity 
+
+```{r}
+# Vague prior (almost flat — sd = 100, no autoscaling)
+fit_vague <- update(fit_default,
+                    prior          = normal(0, 100, autoscale = FALSE),
+                    prior_intercept = normal(0, 100, autoscale = FALSE))
+
+# Tight prior (strong shrinkage toward 0 — sd = 1, no autoscaling)
+fit_tight <- update(fit_default,
+                    prior = normal(0, 1, autoscale = FALSE))
+```
+```{r}
+# Compare posterior means and SDs across priors
+get_summary <- function(fit, label) {
+  s <- summary(fit, digits = 3)
+  data.frame(
+    prior     = label,
+    parameter = rownames(s),
+    mean      = round(s[, "mean"], 3),
+    sd        = round(s[, "sd"], 3)
+  )
+}
+
+priors_compare <- rbind(
+  get_summary(fit_default, "Default"),
+  get_summary(fit_vague,   "Vague (sd=100)"),
+  get_summary(fit_tight,   "Tight (sd=1)")
+)
+
+# Show only the regression coefficients (cleaner)
+keep_params <- c("cement", "slag", "ash", "water",
+                 "superplasticizer", "coarse_agg",
+                 "fine_agg", "log_age", "sigma")
+priors_compare <- priors_compare[priors_compare$parameter %in% keep_params, ]
+priors_compare
+```
+
+# test the model against the test set 
+
+
+```{r}
+# 1. Generate posterior predictive draws for the 230 test observations
+test_s <- test_s[, predictors]
+pp_test <- posterior_predict(fit_default, newdata = test_s)
+dim(pp_test)   # should be 12000 x 230 (12,000 posterior draws × 230 test points)
+
+# 2. Compute posterior means (length-230 vector)
+post_mean <- colMeans(pp_test)
+
+# 3. Compute 95% credible intervals (230 x 2 matrix)
+post_int <- t(apply(pp_test, 2, quantile, probs = c(0.025, 0.975)))
+colnames(post_int) <- c("lower", "upper")
+
+# --- SANITY CHECKS — these are critical before saving! ---
+length(post_mean)             # MUST be 230
+dim(post_int)                 # MUST be 230 by 2
+range(post_mean)              # should be roughly within ccs training range (2-83)
+mean(post_int[,2] - post_int[,1])   # average interval width (around 28-30 MPa)
+head(post_mean)               # peek at first few predictions
+head(post_int)                # peek at first few intervals
+
+# 4. Save the submission file
+save(post_mean, post_int, file = "40233_Group_3.RData")
+
+# Verify the file exists
+file.exists("40233_Group_3.RData")
+```
+```{r}
+# Posterior predictive draws on the TRAINING set
+yrep_train <- posterior_predict(fit_default, draws = 1000)
+
+# Posterior mean prediction for each training observation
+train_pred_mean <- colMeans(yrep_train)
+
+# 95% credible intervals on training predictions
+train_pred_int <- t(apply(yrep_train, 2, quantile, probs = c(0.025, 0.975)))
+
+# --- KEY METRICS ---
+
+# 1. Root Mean Squared Error
+rmse_train <- sqrt(mean((train_s$ccs - train_pred_mean)^2))
+
+# 2. Mean Absolute Error
+mae_train <- mean(abs(train_s$ccs - train_pred_mean))
+
+# 3. Bayesian R-squared
+r2_train <- median(bayes_R2(fit_default))
+
+# 4. Coverage of 95% intervals (should be ~0.95 if calibrated)
+covered <- (train_s$ccs >= train_pred_int[, 1]) & (train_s$ccs <= train_pred_int[, 2])
+coverage_train <- mean(covered)
+
+# 5. Mean interval width
+mean_width <- mean(train_pred_int[, 2] - train_pred_int[, 1])
+
+# 6. Correlation between predictions and observations
+pred_obs_cor <- cor(train_s$ccs, train_pred_mean)
+
+
+cat("Training set performance:\n")
+cat("--------------------------\n")
+cat(sprintf("RMSE:                    %.3f MPa\n", rmse_train))
+cat(sprintf("MAE:                     %.3f MPa\n", mae_train))
+cat(sprintf("Bayesian R²:             %.3f\n",     r2_train))
+cat(sprintf("Pred-obs correlation:    %.3f\n",     pred_obs_cor))
+cat(sprintf("95%% interval coverage:   %.3f\n",     coverage_train))
+cat(sprintf("Mean interval width:     %.3f MPa\n", mean_width))
+cat(sprintf("Response range:          [%.2f, %.2f]\n",
+            min(train_s$ccs), max(train_s$ccs)))
+```
+
